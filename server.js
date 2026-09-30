@@ -9,6 +9,8 @@ const crypto = require("crypto");
 const app = express();
 const PORT = 3000;
 
+
+
 const ROOT = __dirname;
 const STORAGE = path.join(ROOT, "storage", "jobs");
 const DATA = path.join(ROOT, "data");
@@ -16,6 +18,8 @@ const DATA = path.join(ROOT, "data");
 fs.mkdirSync(STORAGE, { recursive: true });
 fs.mkdirSync(DATA, { recursive: true });
 
+const cors = require("cors");
+app.use(cors());
 app.use(express.json());
 
 // SQLite database stored on your PC
@@ -39,34 +43,51 @@ db.exec(`
   )
 `);
 
-// Only allow PDF, JPG, PNG uploads
-const allowedTypes = {
-  "application/pdf": ".pdf",
-  "image/jpeg": ".jpg",
-  "image/png": ".png"
-};
+
+const storage = multer.diskStorage({
+
+    destination: (req, file, cb) => {
+        cb(null, STORAGE);
+    },
+
+    filename: (req, file, cb) => {
+
+        const extension =
+            path.extname(file.originalname);
+
+        const filename =
+            `${Date.now()}-${crypto.randomUUID()}${extension}`;
+
+        cb(null, filename);
+    }
+
+});
 
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      cb(null, STORAGE);
+
+    storage: storage,
+
+    limits: {
+        fileSize: 25 * 1024 * 1024
     },
-    filename: (req, file, cb) => {
-      const ext = allowedTypes[file.mimetype];
-      cb(null, crypto.randomUUID() + ext);
-    }
-  }),
-  limits: {
-    fileSize: 25 * 1024 * 1024, // 25 MB
-    files: 1
-  },
-  fileFilter: (req, file, cb) => {
-    if (!allowedTypes[file.mimetype]) {
-      return cb(new Error("Only PDF, JPG and PNG files are allowed"));
+
+    fileFilter: (req, file, cb) => {
+
+        const allowed = [
+            "application/pdf",
+            "image/jpeg",
+            "image/png"
+        ];
+
+        if (allowed.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error(
+                "Only PDF, JPG and PNG files are allowed"
+            ));
+        }
     }
 
-    cb(null, true);
-  }
 });
 
 // Health check
@@ -78,80 +99,78 @@ app.get("/api/health", (req, res) => {
 });
 
 // Upload a print job
-app.post("/api/jobs", upload.single("document"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({
-      error: "Please select a document"
-    });
-  }
+app.post("/api/jobs", upload.single("file"), (req, res) => {
 
-  const copies = Number(req.body.copies || 1);
-  const colorMode = req.body.colorMode || "BW";
-  const paperSize = req.body.paperSize || "A4";
+    try {
 
-  if (!Number.isInteger(copies) || copies < 1 || copies > 20) {
-    fs.unlinkSync(req.file.path);
-    return res.status(400).json({
-      error: "Copies must be between 1 and 20"
-    });
-  }
+        if (!req.file) {
+            return res.status(400).json({
+                error: "No file uploaded"
+            });
+        }
 
-  if (!["BW", "COLOR"].includes(colorMode)) {
-    fs.unlinkSync(req.file.path);
-    return res.status(400).json({
-      error: "Invalid color mode"
-    });
-  }
+        const {
+            copies = 1,
+            color_mode = "B&W",
+            paper_size = "A4"
+        } = req.body;
 
-  if (!["A4", "A3", "LETTER"].includes(paperSize)) {
-    fs.unlinkSync(req.file.path);
-    return res.status(400).json({
-      error: "Invalid paper size"
-    });
-  }
 
-  const token = crypto.randomBytes(4)
-    .toString("hex")
-    .toUpperCase();
+        // Generate customer Job ID
+        const token =
+            "XP-" +
+            Math.random()
+                .toString(36)
+                .substring(2, 8)
+                .toUpperCase();
 
-  try {
-    const result = db.prepare(`
-      INSERT INTO jobs (
-        token,
-        original_name,
-        stored_name,
-        file_type,
-        file_size,
-        copies,
-        color_mode,
-        paper_size
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      token,
-      path.basename(req.file.originalname),
-      req.file.filename,
-      req.file.mimetype,
-      req.file.size,
-      copies,
-      colorMode,
-      paperSize
-    );
 
-    res.status(201).json({
-      success: true,
-      jobId: result.lastInsertRowid,
-      token,
-      status: "PENDING"
-    });
-  } catch (error) {
-    fs.unlinkSync(req.file.path);
-    console.error(error);
+        const result = db.prepare(`
+            INSERT INTO jobs (
+                token,
+                original_name,
+                stored_name,
+                file_type,
+                file_size,
+                copies,
+                color_mode,
+                paper_size,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        `).run(
+            token,
+            req.file.originalname,
+            req.file.filename,
+            req.file.mimetype,
+            req.file.size,
+            Number(copies),
+            color_mode,
+            paper_size,
+            "PENDING"
+        );
 
-    res.status(500).json({
-      error: "Could not create print job"
-    });
-  }
+
+        console.log(
+            `New print job: ${token}`
+        );
+
+
+        return res.json({
+            success: true,
+            id: result.lastInsertRowid,
+            token: token
+        });
+
+    } catch (error) {
+
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Failed to create print job"
+        });
+    }
 });
 
 app.get("/api/admin/jobs", (req, res) => {
